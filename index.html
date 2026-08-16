@@ -15,6 +15,7 @@
   No se sube el Excel a ningún servidor; el procesamiento se hace localmente.
 -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <style>
 :root{
@@ -146,7 +147,19 @@ td.center,th.center{text-align:center}
 .mini-front,.mini-back{position:relative;padding:7px}
 .mini-front{border-right:1px solid #222}
 .mini-front img.logo{width:45%;height:auto}
-.mini-temp{width:37%;display:block;margin:7px 0}
+.mini-top-row{display:flex;justify-content:space-between;align-items:flex-start;margin:7px 0}
+.mini-temp{width:34%;display:block}
+.mini-photo{
+  width:28%;
+  aspect-ratio:3/4;
+  object-fit:cover;
+  border:1px solid #333;
+  background:#eee;
+}
+.mini-photo.placeholder{
+  display:flex;align-items:center;justify-content:center;
+  font-size:6px;color:#888;text-align:center;font-weight:700;
+}
 .mini-field{font-size:8px;font-weight:700;line-height:1.45}
 .mini-field span{
   display:inline-block;
@@ -234,7 +247,25 @@ td.center,th.center{text-align:center}
     overflow:hidden;
   }
   .front .logo{width:1.25in;height:auto;display:block}
-  .front .temp{width:1.05in;height:auto;display:block;margin-top:.14in;margin-bottom:.20in}
+  .front .top-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    margin-top:.14in;
+    margin-bottom:.18in;
+  }
+  .front .temp{width:1.0in;height:auto;display:block}
+  .front .photo{
+    width:1.0in;
+    height:1.3in;
+    object-fit:cover;
+    border:1px solid #111;
+    background:#eee;
+  }
+  .front .photo.placeholder{
+    display:flex;align-items:center;justify-content:center;
+    font-size:7.5pt;color:#888;font-weight:700;text-align:center;
+  }
   .field{
     font-size:10.5pt;
     font-weight:700;
@@ -330,12 +361,6 @@ td.center,th.center{text-align:center}
       <div class="info"><b>Período</b><span id="infoPeriod">—</span></div>
       <div class="info"><b>Registros</b><span id="infoCount">0</span></div>
     </div>
-    <div id="plantPanel" class="filters hidden" style="margin-top:12px">
-      <label for="plantsInput">Plantas autorizadas:</label>
-      <input id="plantsInput" type="text" placeholder="Ej.: Choloma, Villanueva"
-        style="flex:1;min-width:260px;padding:10px;border:1px solid #cfd5df;border-radius:8px">
-    </div>
-
     <div id="filters" class="filters hidden">
       <label><input type="radio" name="filter" value="all" checked> Todos</label>
       <label><input type="radio" name="filter" value="new"> Nuevos</label>
@@ -345,6 +370,13 @@ td.center,th.center{text-align:center}
     <div id="warning" class="warning hidden"></div>
 
     <div id="tableWrap"></div>
+
+    <div id="cardTypePanel" class="filters hidden" style="margin-top:16px;padding-top:14px;border-top:1px solid #e4e7ec">
+      <label style="width:100%">Tipo de carnet a imprimir:</label>
+      <label><input type="radio" name="cardType" value="Contratista" checked> Contratista</label>
+      <label><input type="radio" name="cardType" value="Practicante"> Practicante</label>
+      <label><input type="radio" name="cardType" value="Temporal"> Temporal</label>
+    </div>
   </section>
 
   <section class="panel">
@@ -367,6 +399,9 @@ const TEMPORAL = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA3ADcAAD/2wBDAAgGBgc
 let records = [];
 let metadata = {};
 
+// Plantas autorizadas: valor fijo solicitado (ya no es editable por el usuario).
+const PLANTS_FIXED = "Río Nance y Regional";
+
 const $ = id => document.getElementById(id);
 
 function clean(v){
@@ -376,7 +411,7 @@ function clean(v){
 
 function normalize(v){
   return clean(v)
-    .normalize("NFD").replace(/[\\u0300-\\u036f]/g,"")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
     .toLowerCase();
 }
 
@@ -387,10 +422,15 @@ function firstNonEmpty(row, start, end){
   return "";
 }
 
-function parseRequestDate(text){
-  const m = clean(text).match(/(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);
-  if(!m) return null;
-  return new Date(Number(m[3]), Number(m[2])-1, Number(m[1]));
+// Toma solo el primer nombre y el primer apellido de un nombre completo.
+// 4 palabras (Nombre1 Nombre2 Apellido1 Apellido2) -> palabra 1 + palabra 3
+// 3 palabras (Nombre Apellido1 Apellido2)          -> palabra 1 + palabra 2
+// 1-2 palabras -> se dejan tal cual
+function shortName(fullName){
+  const parts = clean(fullName).split(/\s+/).filter(Boolean);
+  if(parts.length <= 2) return parts.join(" ");
+  if(parts.length === 3) return parts[0] + " " + parts[1];
+  return parts[0] + " " + parts[2];
 }
 
 function formatDate(d){
@@ -406,11 +446,6 @@ function addMonths(date, months){
   return d;
 }
 
-function extractMonths(period){
-  const m = clean(period).match(/(\\d+(?:\\.\\d+)?)\\s*mes/i);
-  return m ? Number(m[1]) : 0;
-}
-
 function showStatus(text, ok=false){
   $("status").textContent = text;
   $("status").style.borderColor = ok ? "#9bd4b5" : "#e0e4eb";
@@ -419,6 +454,16 @@ function showStatus(text, ok=false){
 
 function getRows(sheet){
   return XLSX.utils.sheet_to_json(sheet, {header:1, defval:""});
+}
+
+// Si el Excel tiene filas vacías al inicio, sheet_to_json las recorta y el
+// índice 0 del arreglo ya NO corresponde a la fila 0 real de la hoja. Las
+// fotos ancladas (drawing XML) sí usan el número de fila real, así que hay
+// que calcular ese desfase para poder cruzar ambos.
+function getSheetRowOffset(sheet){
+  if(!sheet || !sheet["!ref"]) return 0;
+  const range = XLSX.utils.decode_range(sheet["!ref"]);
+  return range.s.r;
 }
 
 function locateHeader(rows){
@@ -431,10 +476,115 @@ function locateHeader(rows){
   return -1;
 }
 
-function parseWorkbook(wb){
+// ===== Extracción de fotos incrustadas en el Excel =====
+// Un .xlsx es un ZIP. Las fotos flotantes no viven en las celdas, sino en
+// xl/media/*, ancladas a filas mediante xl/drawings/drawingN.xml. Aquí se
+// abre el ZIP con JSZip y se arma un mapa fila(0-based) -> imagen dataURL.
+
+function resolvePath(baseFolder, target){
+  if(!target) return null;
+  if(target.startsWith("/")) return target.replace(/^\/+/, "");
+  const baseParts = baseFolder ? baseFolder.split("/").filter(Boolean) : [];
+  const targetParts = target.split("/");
+  for(const part of targetParts){
+    if(part === "..") baseParts.pop();
+    else if(part === "." || part === "") continue;
+    else baseParts.push(part);
+  }
+  return baseParts.join("/");
+}
+
+async function extractEmbeddedImages(buffer, sheetName){
+  if(typeof JSZip === "undefined") return {};
+  try{
+    const zip = await JSZip.loadAsync(buffer);
+    const parser = new DOMParser();
+
+    const wbFile = zip.file("xl/workbook.xml");
+    const relsFile = zip.file("xl/_rels/workbook.xml.rels");
+    if(!wbFile || !relsFile) return {};
+
+    const wbDoc = parser.parseFromString(await wbFile.async("string"), "application/xml");
+    const relsDoc = parser.parseFromString(await relsFile.async("string"), "application/xml");
+
+    const sheetEls = [...wbDoc.getElementsByTagName("sheet")];
+    const sheetEl = sheetEls.find(s => s.getAttribute("name") === sheetName) || sheetEls[0];
+    if(!sheetEl) return {};
+    const rId = sheetEl.getAttribute("r:id") ||
+      sheetEl.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships","id");
+
+    const sheetRel = [...relsDoc.getElementsByTagName("Relationship")].find(r => r.getAttribute("Id") === rId);
+    if(!sheetRel) return {};
+
+    const sheetPath = resolvePath("xl", sheetRel.getAttribute("Target"));
+    const sheetFolder = sheetPath.substring(0, sheetPath.lastIndexOf("/"));
+    const sheetFileName = sheetPath.substring(sheetPath.lastIndexOf("/")+1);
+
+    const sheetRelsFile = zip.file(`${sheetFolder}/_rels/${sheetFileName}.rels`);
+    if(!sheetRelsFile) return {};
+    const sheetRelsDoc = parser.parseFromString(await sheetRelsFile.async("string"), "application/xml");
+    const drawingRel = [...sheetRelsDoc.getElementsByTagName("Relationship")]
+      .find(r => (r.getAttribute("Type")||"").includes("drawing"));
+    if(!drawingRel) return {};
+
+    const drawingPath = resolvePath(sheetFolder, drawingRel.getAttribute("Target"));
+    const drawingFile = zip.file(drawingPath);
+    if(!drawingFile) return {};
+    const drawingFolder = drawingPath.substring(0, drawingPath.lastIndexOf("/"));
+    const drawingFileName = drawingPath.substring(drawingPath.lastIndexOf("/")+1);
+
+    const drawingDoc = parser.parseFromString(await drawingFile.async("string"), "application/xml");
+
+    const embedMap = {};
+    const drawingRelsFile = zip.file(`${drawingFolder}/_rels/${drawingFileName}.rels`);
+    if(drawingRelsFile){
+      const drawingRelsDoc = parser.parseFromString(await drawingRelsFile.async("string"), "application/xml");
+      [...drawingRelsDoc.getElementsByTagName("Relationship")].forEach(r=>{
+        embedMap[r.getAttribute("Id")] = resolvePath(drawingFolder, r.getAttribute("Target"));
+      });
+    }
+
+    const anchors = [
+      ...drawingDoc.getElementsByTagNameNS("*","twoCellAnchor"),
+      ...drawingDoc.getElementsByTagNameNS("*","oneCellAnchor")
+    ];
+
+    const rowImageMap = {};
+    for(const anchor of anchors){
+      const fromEl = anchor.getElementsByTagNameNS("*","from")[0];
+      const blipEl = anchor.getElementsByTagNameNS("*","blip")[0];
+      if(!fromEl || !blipEl) continue;
+      const rowEl = fromEl.getElementsByTagNameNS("*","row")[0];
+      const row = rowEl ? parseInt(rowEl.textContent, 10) : null;
+      if(row === null || isNaN(row)) continue;
+
+      const embedId = blipEl.getAttribute("r:embed") ||
+        blipEl.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships","embed");
+      const imgPath = embedMap[embedId];
+      if(!imgPath) continue;
+      const imgFile = zip.file(imgPath);
+      if(!imgFile) continue;
+
+      const base64 = await imgFile.async("base64");
+      const ext = imgPath.split(".").pop().toLowerCase();
+      const mime = ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "bmp" ? "image/bmp" : "image/jpeg";
+
+      // Si varias imágenes caen en la misma fila, se conserva la primera.
+      if(!rowImageMap[row]) rowImageMap[row] = `data:${mime};base64,${base64}`;
+    }
+    return rowImageMap;
+  }catch(err){
+    console.warn("No se pudieron extraer las fotos del Excel:", err);
+    return {};
+  }
+}
+
+function parseWorkbook(wb, rowImageMap){
+  rowImageMap = rowImageMap || {};
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
   const rows = getRows(ws);
+  const rowOffset = getSheetRowOffset(ws);
 
   const headerRow = locateHeader(rows);
   if(headerRow < 0) throw new Error("No se encontró la fila de encabezados de personal.");
@@ -443,13 +593,9 @@ function parseWorkbook(wb){
   metadata.project = firstNonEmpty(rows[12] || [], 1, 6);
   metadata.period = firstNonEmpty(rows[13] || [], 1, 7);
 
-  // La plantilla entregada tiene la fecha de solicitud en la fila 8.
-  const requestDateText = firstNonEmpty(rows[7] || [], 1, 17);
-  metadata.requestDate = parseRequestDate(requestDateText);
-  metadata.requestDateText = requestDateText;
-
-  const months = extractMonths(metadata.period);
-  metadata.expiryDate = metadata.requestDate && months ? addMonths(metadata.requestDate, months) : null;
+  // Emisión = día en que se genera el carnet. Vencimiento = 6 meses después.
+  metadata.requestDate = new Date();
+  metadata.expiryDate = addMonths(metadata.requestDate, 6);
 
   const out = [];
   for(let r=headerRow+1;r<rows.length;r++){
@@ -457,21 +603,24 @@ function parseWorkbook(wb){
 
     // En la plantilla los campos están repartidos en celdas combinadas:
     // Nombre C:E, Identidad F:G, Cargo H:J, Foto K, Renovación L, Nuevo M.
-    const name = firstNonEmpty(row, 2, 4);
+    const rawName = firstNonEmpty(row, 2, 4);
+    const name = shortName(rawName);
     const dni = firstNonEmpty(row, 5, 6);
     const cargo = firstNonEmpty(row, 7, 9);
     const photoCell = clean(row[10]);
     const renewal = clean(row[11]);
     const newCard = clean(row[12]);
 
-    if(!name && !dni && !cargo) continue;
+    if(!rawName && !dni && !cargo) continue;
 
     out.push({
       index: out.length + 1,
       name,
+      fullName: rawName,
       dni,
       cargo,
       photoCell,
+      photo: rowImageMap[rowOffset + r] || null,
       renewal: !!renewal,
       newCard: !!newCard,
       type: renewal ? "Renovación" : (newCard ? "Nuevo" : "Sin tipo"),
@@ -494,7 +643,11 @@ function filteredRecords(){
 }
 
 function authorizedPlants(){
-  return clean(document.getElementById("plantsInput")?.value || "");
+  return PLANTS_FIXED;
+}
+
+function currentCardType(){
+  return document.querySelector('input[name="cardType"]:checked')?.value || "Contratista";
 }
 
 function renderTable(){
@@ -531,12 +684,19 @@ function esc(s){
 }
 
 function previewCard(r){
+  const cardType = currentCardType();
+  const photoHtml = r.photo
+    ? `<img class="mini-photo" src="${r.photo}">`
+    : `<div class="mini-photo placeholder">SIN<br>FOTO</div>`;
   return `<div class="preview-card">
     <h3>${esc(r.index)}. ${esc(r.name || "Sin nombre")} — ${esc(r.type)}</h3>
     <div class="mini-carnet">
       <div class="mini-front">
         <img class="logo" src="${LOGO}">
-        <img class="mini-temp" src="${TEMPORAL}">
+        <div class="mini-top-row">
+          <img class="mini-temp" src="${TEMPORAL}">
+          ${photoHtml}
+        </div>
         <div class="mini-field">Nombre: <span>${esc(r.name)}</span></div>
         <div class="mini-field">Empresa: <span>${esc(metadata.contractor)}</span></div>
         <div class="mini-field">DNI: <span>${esc(r.dni)}</span></div>
@@ -544,7 +704,7 @@ function previewCard(r){
         <div class="mini-field">Venc.: <span>${esc(formatDate(r.expiry))}</span></div>
         <div class="mini-field">Plantas: <span>${esc(authorizedPlants())}</span></div>
         <div class="mini-sign">Firma y Sello de Seguridad</div>
-        <div class="mini-contractor">CONTRATISTA</div>
+        <div class="mini-contractor">${esc(cardType.toUpperCase())}</div>
       </div>
       <div class="mini-back">
         <img class="watermark" src="${GSD}">
@@ -578,10 +738,17 @@ function renderPrint(){
 }
 
 function printCarnet(r, pos){
+  const cardType = currentCardType();
+  const photoHtml = r.photo
+    ? `<img class="photo" src="${r.photo}">`
+    : `<div class="photo placeholder">SIN FOTO</div>`;
   return `<div class="print-carnet ${pos}">
     <div class="front">
       <img class="logo" src="${LOGO}">
-      <img class="temp" src="${TEMPORAL}">
+      <div class="top-row">
+        <img class="temp" src="${TEMPORAL}">
+        ${photoHtml}
+      </div>
       <div class="field">Nombre: <span class="value">${esc(r.name)}</span></div>
       <div class="field">Empresa: <span class="value">${esc(metadata.contractor)}</span></div>
       <div class="field">DNI: <span class="value">${esc(r.dni)}</span></div>
@@ -589,7 +756,7 @@ function printCarnet(r, pos){
       <div class="field">Vencimiento: <span class="value">${esc(formatDate(r.expiry))}</span></div>
       <div class="field plants">Plantas Autorizadas: <span class="value">${esc(authorizedPlants())}</span></div>
       <div class="signature">Firma y Sello de Seguridad</div>
-      <div class="contractor">CONTRATISTA</div>
+      <div class="contractor">${esc(cardType.toUpperCase())}</div>
     </div>
     <div class="back">
       <img class="watermark" src="${GSD}">
@@ -611,7 +778,12 @@ $("excelFile").addEventListener("change", async e=>{
     showStatus("Leyendo Excel...");
     const buffer=await file.arrayBuffer();
     const wb=XLSX.read(buffer,{type:"array"});
-    records=parseWorkbook(wb);
+    const sheetName=wb.SheetNames[0];
+
+    showStatus("Buscando fotos incrustadas...");
+    const rowImageMap = await extractEmbeddedImages(buffer, sheetName);
+
+    records=parseWorkbook(wb, rowImageMap);
 
     if(!records.length) throw new Error("No se encontraron personas en la solicitud.");
 
@@ -621,16 +793,15 @@ $("excelFile").addEventListener("change", async e=>{
     $("infoCount").textContent=records.length;
     $("info").classList.remove("hidden");
     $("filters").classList.remove("hidden");
-    $("plantPanel").classList.remove("hidden");
+    $("cardTypePanel").classList.remove("hidden");
 
     $("previewBtn").disabled=false;
     $("printBtn").disabled=false;
 
     const warnings=[];
-    if(!metadata.requestDate) warnings.push("No se pudo detectar la fecha de solicitud; la emisión quedará vacía.");
-    if(!metadata.expiryDate) warnings.push("No se pudo calcular el vencimiento a partir del período.");
     if(records.some(r=>!r.dni)) warnings.push("Hay personas sin DNI.");
-    if(records.some(r=>!r.name)) warnings.push("Hay personas sin nombre.");
+    if(records.some(r=>!r.fullName)) warnings.push("Hay personas sin nombre.");
+    if(records.some(r=>!r.photo)) warnings.push("Hay personas sin foto detectada en el Excel; revíselas antes de imprimir.");
 
     if(warnings.length){
       $("warning").classList.remove("hidden");
@@ -662,13 +833,15 @@ document.querySelectorAll('input[name="filter"]').forEach(el=>{
   });
 });
 
-$("previewBtn").addEventListener("click",()=>{
-  $("preview").scrollIntoView({behavior:"smooth"});
+document.querySelectorAll('input[name="cardType"]').forEach(el=>{
+  el.addEventListener("change",()=>{
+    renderPreview();
+    renderPrint();
+  });
 });
 
-$("plantsInput").addEventListener("input",()=>{
-  renderPreview();
-  renderPrint();
+$("previewBtn").addEventListener("click",()=>{
+  $("preview").scrollIntoView({behavior:"smooth"});
 });
 
 $("printBtn").addEventListener("click",()=>{
@@ -682,8 +855,7 @@ $("clearBtn").addEventListener("click",()=>{
   $("excelFile").value="";
   $("info").classList.add("hidden");
   $("filters").classList.add("hidden");
-  $("plantPanel").classList.add("hidden");
-  $("plantsInput").value="";
+  $("cardTypePanel").classList.add("hidden");
   $("warning").classList.add("hidden");
   $("previewBtn").disabled=true;
   $("printBtn").disabled=true;

@@ -513,6 +513,7 @@ async function extractEmbeddedImages(buffer, sheetName){
   try{
     const zip = await JSZip.loadAsync(buffer);
     const parser = new DOMParser();
+    const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
     const wbFile = zip.file("xl/workbook.xml");
     const relsFile = zip.file("xl/_rels/workbook.xml.rels");
@@ -524,68 +525,152 @@ async function extractEmbeddedImages(buffer, sheetName){
     const sheetEls = [...wbDoc.getElementsByTagName("sheet")];
     const sheetEl = sheetEls.find(s => s.getAttribute("name") === sheetName) || sheetEls[0];
     if(!sheetEl) return {};
-    const rId = sheetEl.getAttribute("r:id") ||
-      sheetEl.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships","id");
+    const sheetRId = sheetEl.getAttribute("r:id") || sheetEl.getAttributeNS(REL_NS,"id");
 
-    const sheetRel = [...relsDoc.getElementsByTagName("Relationship")].find(r => r.getAttribute("Id") === rId);
+    const sheetRel = [...relsDoc.getElementsByTagName("Relationship")].find(r => r.getAttribute("Id") === sheetRId);
     if(!sheetRel) return {};
 
     const sheetPath = resolvePath("xl", sheetRel.getAttribute("Target"));
     const sheetFolder = sheetPath.substring(0, sheetPath.lastIndexOf("/"));
     const sheetFileName = sheetPath.substring(sheetPath.lastIndexOf("/")+1);
 
-    const sheetRelsFile = zip.file(`${sheetFolder}/_rels/${sheetFileName}.rels`);
-    if(!sheetRelsFile) return {};
-    const sheetRelsDoc = parser.parseFromString(await sheetRelsFile.async("string"), "application/xml");
-    const drawingRel = [...sheetRelsDoc.getElementsByTagName("Relationship")]
-      .find(r => (r.getAttribute("Type")||"").includes("drawing"));
-    if(!drawingRel) return {};
-
-    const drawingPath = resolvePath(sheetFolder, drawingRel.getAttribute("Target"));
-    const drawingFile = zip.file(drawingPath);
-    if(!drawingFile) return {};
-    const drawingFolder = drawingPath.substring(0, drawingPath.lastIndexOf("/"));
-    const drawingFileName = drawingPath.substring(drawingPath.lastIndexOf("/")+1);
-
-    const drawingDoc = parser.parseFromString(await drawingFile.async("string"), "application/xml");
-
-    const embedMap = {};
-    const drawingRelsFile = zip.file(`${drawingFolder}/_rels/${drawingFileName}.rels`);
-    if(drawingRelsFile){
-      const drawingRelsDoc = parser.parseFromString(await drawingRelsFile.async("string"), "application/xml");
-      [...drawingRelsDoc.getElementsByTagName("Relationship")].forEach(r=>{
-        embedMap[r.getAttribute("Id")] = resolvePath(drawingFolder, r.getAttribute("Target"));
-      });
-    }
-
-    const anchors = [
-      ...drawingDoc.getElementsByTagNameNS("*","twoCellAnchor"),
-      ...drawingDoc.getElementsByTagNameNS("*","oneCellAnchor")
-    ];
-
     const rowImageMap = {};
-    for(const anchor of anchors){
-      const fromEl = anchor.getElementsByTagNameNS("*","from")[0];
-      const blipEl = anchor.getElementsByTagNameNS("*","blip")[0];
-      if(!fromEl || !blipEl) continue;
-      const rowEl = fromEl.getElementsByTagNameNS("*","row")[0];
-      const row = rowEl ? parseInt(rowEl.textContent, 10) : null;
-      if(row === null || isNaN(row)) continue;
 
-      const embedId = blipEl.getAttribute("r:embed") ||
-        blipEl.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships","embed");
-      const imgPath = embedMap[embedId];
-      if(!imgPath) continue;
+    async function imgPathToDataUrl(imgPath){
       const imgFile = zip.file(imgPath);
-      if(!imgFile) continue;
-
+      if(!imgFile) return null;
       const base64 = await imgFile.async("base64");
       const ext = imgPath.split(".").pop().toLowerCase();
       const mime = ext === "png" ? "image/png" : ext === "gif" ? "image/gif" : ext === "bmp" ? "image/bmp" : "image/jpeg";
-
-      // Si varias imágenes caen en la misma fila, se conserva la primera.
-      if(!rowImageMap[row]) rowImageMap[row] = `data:${mime};base64,${base64}`;
+      return `data:${mime};base64,${base64}`;
     }
+
+    // ===== 1) Fotos "pegadas" (flotantes, ancladas mediante drawing XML) =====
+    try{
+      const sheetRelsFile = zip.file(`${sheetFolder}/_rels/${sheetFileName}.rels`);
+      if(sheetRelsFile){
+        const sheetRelsDoc = parser.parseFromString(await sheetRelsFile.async("string"), "application/xml");
+        const drawingRel = [...sheetRelsDoc.getElementsByTagName("Relationship")]
+          .find(r => (r.getAttribute("Type")||"").includes("drawing"));
+
+        if(drawingRel){
+          const drawingPath = resolvePath(sheetFolder, drawingRel.getAttribute("Target"));
+          const drawingFile = zip.file(drawingPath);
+          if(drawingFile){
+            const drawingFolder = drawingPath.substring(0, drawingPath.lastIndexOf("/"));
+            const drawingFileName = drawingPath.substring(drawingPath.lastIndexOf("/")+1);
+            const drawingDoc = parser.parseFromString(await drawingFile.async("string"), "application/xml");
+
+            const embedMap = {};
+            const drawingRelsFile = zip.file(`${drawingFolder}/_rels/${drawingFileName}.rels`);
+            if(drawingRelsFile){
+              const drawingRelsDoc = parser.parseFromString(await drawingRelsFile.async("string"), "application/xml");
+              [...drawingRelsDoc.getElementsByTagName("Relationship")].forEach(r=>{
+                embedMap[r.getAttribute("Id")] = resolvePath(drawingFolder, r.getAttribute("Target"));
+              });
+            }
+
+            const anchors = [
+              ...drawingDoc.getElementsByTagNameNS("*","twoCellAnchor"),
+              ...drawingDoc.getElementsByTagNameNS("*","oneCellAnchor")
+            ];
+
+            for(const anchor of anchors){
+              const fromEl = anchor.getElementsByTagNameNS("*","from")[0];
+              const blipEl = anchor.getElementsByTagNameNS("*","blip")[0];
+              if(!fromEl || !blipEl) continue;
+              const rowEl = fromEl.getElementsByTagNameNS("*","row")[0];
+              const row = rowEl ? parseInt(rowEl.textContent, 10) : null;
+              if(row === null || isNaN(row)) continue;
+
+              const embedId = blipEl.getAttribute("r:embed") || blipEl.getAttributeNS(REL_NS,"embed");
+              const imgPath = embedMap[embedId];
+              if(!imgPath) continue;
+              const dataUrl = await imgPathToDataUrl(imgPath);
+              if(!dataUrl) continue;
+
+              // Si varias imágenes caen en la misma fila, se conserva la primera.
+              if(!rowImageMap[row]) rowImageMap[row] = dataUrl;
+            }
+          }
+        }
+      }
+    }catch(err){
+      console.warn("No se pudieron leer las fotos flotantes (pegadas):", err);
+    }
+
+    // ===== 2) Fotos "incrustadas en la celda" (función moderna de Excel   =====
+    // ===== "Insertar imagen > Colocar en celda", almacenada en xl/richData) =====
+    try{
+      const metadataFile = zip.file("xl/metadata.xml");
+      const richValueFile = zip.file("xl/richData/rdrichvalue.xml");
+      const richRelFile = zip.file("xl/richData/richValueRel.xml");
+      const richRelRelsFile = zip.file("xl/richData/_rels/richValueRel.xml.rels");
+      const sheetXmlFile = zip.file(sheetPath);
+
+      if(metadataFile && richValueFile && richRelFile && richRelRelsFile && sheetXmlFile){
+        const metadataDoc = parser.parseFromString(await metadataFile.async("string"), "application/xml");
+        // valueMetadata[i] (0-based) = índice de rich value (rv) asociado al vm=(i+1) de una celda.
+        const valueMetadata = [...metadataDoc.getElementsByTagName("valueMetadata")[0]?.children || []]
+          .map(bk => {
+            const rc = bk.getElementsByTagName("rc")[0];
+            return rc ? parseInt(rc.getAttribute("v"), 10) : null;
+          });
+
+        const richValueDoc = parser.parseFromString(await richValueFile.async("string"), "application/xml");
+        // rv[i] (0-based, orden de aparición) = identificador local de imagen (índice en richValueRel.xml).
+        const richValues = [...richValueDoc.getElementsByTagNameNS("*","rv")].map(rv=>{
+          const vEls = rv.getElementsByTagNameNS("*","v");
+          const localImageId = vEls.length ? parseInt(vEls[0].textContent, 10) : null;
+          return { localImageId };
+        });
+
+        const richRelDoc = parser.parseFromString(await richRelFile.async("string"), "application/xml");
+        // relList[i] (0-based, orden de aparición) = rId de la relación de imagen.
+        const relList = [...richRelDoc.getElementsByTagNameNS("*","rel")].map(rel=>
+          rel.getAttribute("r:id") || rel.getAttributeNS(REL_NS,"id")
+        );
+
+        const richRelRelsDoc = parser.parseFromString(await richRelRelsFile.async("string"), "application/xml");
+        const richImgMap = {};
+        [...richRelRelsDoc.getElementsByTagName("Relationship")].forEach(r=>{
+          richImgMap[r.getAttribute("Id")] = resolvePath("xl/richData", r.getAttribute("Target"));
+        });
+
+        const sheetDoc = parser.parseFromString(await sheetXmlFile.async("string"), "application/xml");
+        const cellsWithVm = [...sheetDoc.getElementsByTagNameNS("*","c")].filter(c => c.getAttribute("vm"));
+
+        for(const cell of cellsWithVm){
+          const cellRef = cell.getAttribute("r") || "";
+          const m = cellRef.match(/^[A-Z]+(\d+)$/);
+          if(!m) continue;
+          const row = parseInt(m[1], 10) - 1; // 0-based, misma base que las anclas flotantes
+
+          const vm = parseInt(cell.getAttribute("vm"), 10);
+          const rvIndex = valueMetadata[vm - 1];
+          if(rvIndex === null || rvIndex === undefined) continue;
+
+          const rv = richValues[rvIndex];
+          if(!rv || rv.localImageId === null || rv.localImageId === undefined) continue;
+
+          const relId = relList[rv.localImageId];
+          if(!relId) continue;
+
+          const imgPath = richImgMap[relId];
+          if(!imgPath) continue;
+
+          const dataUrl = await imgPathToDataUrl(imgPath);
+          if(!dataUrl) continue;
+
+          // La imagen "en celda" es el mecanismo más reciente y explícito:
+          // si la fila también tenía una imagen flotante, se prefiere esta.
+          rowImageMap[row] = dataUrl;
+        }
+      }
+    }catch(err){
+      console.warn("No se pudieron leer las fotos incrustadas en celda:", err);
+    }
+
     return rowImageMap;
   }catch(err){
     console.warn("No se pudieron extraer las fotos del Excel:", err);
@@ -625,7 +710,11 @@ function parseWorkbook(wb, rowImageMap){
     const renewal = clean(row[11]);
     const newCard = clean(row[12]);
 
-    if(!rawName && !dni && !cargo) continue;
+    // Filas como "Vo.Bo. Ing. Supervisor" o el pie de página con el nombre de
+    // la empresa caen en la columna de Nombre pero no son personas reales:
+    // se descartan exigiendo al menos DNI o Cargo (una persona siempre trae
+    // uno de los dos; una firma o texto suelto no trae ninguno).
+    if(!dni && !cargo) continue;
 
     out.push({
       index: out.length + 1,

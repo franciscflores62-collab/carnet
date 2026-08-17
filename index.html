@@ -238,7 +238,7 @@ td.center,th.center{text-align:center}
   .front{
     position:relative;
     border-right:1px solid #111;
-    padding:.16in .12in .10in .12in;
+    padding:.14in .12in .60in .12in;
     overflow:hidden;
   }
   .back{
@@ -251,13 +251,13 @@ td.center,th.center{text-align:center}
     display:flex;
     justify-content:space-between;
     align-items:flex-start;
-    margin-top:.14in;
-    margin-bottom:.18in;
+    margin-top:.08in;
+    margin-bottom:.10in;
   }
   .front .temp{width:1.0in;height:auto;display:block}
   .front .photo{
     width:1.0in;
-    height:1.3in;
+    height:1.0in;
     object-fit:cover;
     border:1px solid #111;
     background:#eee;
@@ -267,9 +267,9 @@ td.center,th.center{text-align:center}
     font-size:7.5pt;color:#888;font-weight:700;text-align:center;
   }
   .field{
-    font-size:10.5pt;
+    font-size:9.5pt;
     font-weight:700;
-    line-height:1.48;
+    line-height:1.32;
     white-space:nowrap;
   }
   .field .value{
@@ -368,6 +368,12 @@ td.center,th.center{text-align:center}
     <div id="warning" class="warning hidden"></div>
 
     <div id="tableWrap"></div>
+
+    <div id="companyPanel" class="filters hidden" style="margin-top:16px;padding-top:14px;border-top:1px solid #e4e7ec">
+      <label for="companyInput" style="width:100%">Empresa / Contratista (puede editarse):</label>
+      <input id="companyInput" type="text" placeholder="Escriba el nombre del contratista"
+        style="flex:1;min-width:260px;padding:10px;border:1px solid #cfd5df;border-radius:8px">
+    </div>
 
     <div id="cardTypePanel" class="filters hidden" style="margin-top:16px;padding-top:14px;border-top:1px solid #e4e7ec">
       <label style="width:100%">Tipo de carnet a imprimir:</label>
@@ -649,6 +655,10 @@ function authorizedPlants(){
   return document.querySelector('input[name="plantOption"]:checked')?.value || "Río Nance";
 }
 
+function currentCompany(){
+  return clean($("companyInput")?.value || "");
+}
+
 function currentCardType(){
   return document.querySelector('input[name="cardType"]:checked')?.value || "Contratista";
 }
@@ -713,7 +723,7 @@ function previewCard(r){
           ${photoHtml}
         </div>
         <div class="mini-field">Nombre: <span>${esc(r.name)}</span></div>
-        <div class="mini-field">Empresa: <span>${esc(metadata.contractor)}</span></div>
+        <div class="mini-field">Empresa: <span>${esc(currentCompany())}</span></div>
         <div class="mini-field">DNI: <span>${esc(r.dni)}</span></div>
         <div class="mini-field">Emisión: <span>${esc(formatDate(r.emission))}</span></div>
         <div class="mini-field">Venc.: <span>${esc(formatDate(r.expiry))}</span></div>
@@ -766,7 +776,7 @@ function printCarnet(r, pos){
         ${photoHtml}
       </div>
       <div class="field">Nombre: <span class="value">${esc(r.name)}</span></div>
-      <div class="field">Empresa: <span class="value">${esc(metadata.contractor)}</span></div>
+      <div class="field">Empresa: <span class="value">${esc(currentCompany())}</span></div>
       <div class="field">DNI: <span class="value">${esc(r.dni)}</span></div>
       <div class="field">Emisión: <span class="value">${esc(formatDate(r.emission))}</span></div>
       <div class="field">Vencimiento: <span class="value">${esc(formatDate(r.expiry))}</span></div>
@@ -811,6 +821,8 @@ $("excelFile").addEventListener("change", async e=>{
     $("filters").classList.remove("hidden");
     $("cardTypePanel").classList.remove("hidden");
     $("plantPanel").classList.remove("hidden");
+    $("companyPanel").classList.remove("hidden");
+    $("companyInput").value = metadata.contractor || "";
 
     $("previewBtn").disabled=false;
     $("printBtn").disabled=false;
@@ -864,6 +876,11 @@ document.querySelectorAll('input[name="plantOption"]').forEach(el=>{
   });
 });
 
+$("companyInput").addEventListener("input",()=>{
+  renderPreview();
+  renderPrint();
+});
+
 $("previewBtn").addEventListener("click",()=>{
   $("preview").scrollIntoView({behavior:"smooth"});
 });
@@ -881,6 +898,8 @@ $("clearBtn").addEventListener("click",()=>{
   $("filters").classList.add("hidden");
   $("cardTypePanel").classList.add("hidden");
   $("plantPanel").classList.add("hidden");
+  $("companyPanel").classList.add("hidden");
+  $("companyInput").value="";
   $("warning").classList.add("hidden");
   $("previewBtn").disabled=true;
   $("printBtn").disabled=true;
